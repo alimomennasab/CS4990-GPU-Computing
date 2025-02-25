@@ -20,6 +20,7 @@ double CPUTimer(){
 
 // CPU only matrix multiplication
 void basicSgemm_h(int m, int k, int n, const float *A_h, const float *B_h, float* C_h){
+    double startTime = CPUTimer();
     for (int row1 = 0; row1 < m; row1++){
         for (int col2 = 0; col2 < n; col2++){
             C_h[row1 * n + col2] = (float)0;
@@ -29,14 +30,59 @@ void basicSgemm_h(int m, int k, int n, const float *A_h, const float *B_h, float
         }
     }
 
+    double endTime = CPUTimer();
+
+    printf("basicSgemm_h on CPU: %.6f s\n", endTime - startTime);
+
     // print results
-    for (int i = 0; i < m; i++) {
-        for (int j = 0; j < n; j++) {
-            printf("%f ", C_h[i * n + j]);
-        }
-        printf("\n");
-    }
+    // for (int i = 0; i < m; i++) {
+    //     for (int j = 0; j < n; j++) {
+    //         printf("%f ", C_h[i * n + j]);
+    //     }
+    //     printf("\n");
+    // }
 }
+
+// CUDA kernel where each thread computes one output matrix element, 
+// and function for device allocation and free, memcpy, and calling the kernel
+__global__ void matrixMulKernel_1thread1element (int m, int k, int n, const float *A_d, const float *B_d, float* C_d){
+    unsigned int row = blockIdx.y*blockDim.y + threadIdx.y;
+    unsigned int col = blockIdx.x*blockDim.x + threadIdx.x;
+
+    if (row < m && col < n){
+        float sum = 0.0f;
+        for (unsigned int i = 0; i < k; ++i) {
+            sum += A_d[row * k + i] * B_d[i * n + col];
+        }
+        C_d[row * n + col] = sum;
+    }
+
+}
+
+void basicSgemm_d_1thread1element (int m, int k, int n, const float *A_h, const float *B_h, float* C_h){
+    // allocate device memory on GPU for arrays A_d, B_d, C_d
+    float *A_d,  *B_d, *C_d;
+    CHECK(cudaMalloc((void**)&A_d, sizeof(float)*(m * k)));
+    CHECK(cudaMalloc((void**)&B_d, sizeof(float)*(k * n)));
+    CHECK(cudaMalloc((void**)&C_d, sizeof(float)*(m * n)));
+
+    // copy A_h and B_h to A_d and B_d
+    CHECK(cudaMemcpy(A_d, A_h, sizeof(float)*(m*k), cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(B_d, B_h, sizeof(float)*(k*n), cudaMemcpyHostToDevice));
+
+    // calling matrixMulKernel_1thread1element kernel
+    matrixMulKernel_1thread1element<<<(ceil(n / 512.0), 1, 1), (512, 1, 1)>>>(m, k, n, A_d, B_d, C_d);
+
+    // copy GPU matmul results to host memory
+    cudaMemcpy(C_h, C_d, sizeof(float)*n, cudaMemcpyDeviceToHost);
+
+    // free device memory
+    cudaFree(A_d);
+    cudaFree(B_d);
+    cudaFree(C_d);
+
+}
+
 
 int main(int argc, char *argv[]) {
     // ./sgemm <m> <k> <n>
