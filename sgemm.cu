@@ -43,8 +43,7 @@ void basicSgemm_h(int m, int k, int n, const float *A_h, const float *B_h, float
     // }
 }
 
-// CUDA kernel where each thread computes one output matrix element, 
-// and function for device allocation and free, memcpy, and calling the kernel
+// CUDA kernel where each thread computes one output matrix element
 __global__ void matrixMulKernel_1thread1element (int m, int k, int n, const float *A_d, const float *B_d, float* C_d){
     unsigned int row = blockIdx.y * blockDim.y + threadIdx.y;
     unsigned int col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -58,6 +57,39 @@ __global__ void matrixMulKernel_1thread1element (int m, int k, int n, const floa
     }
 }
 
+// CUDA kernel where each thread computes one output matrix row
+__global__ void matrixMulKernel_1thread1row(int m, int k, int n, const float *A_d, const float *B_d, float* C_d){
+    unsigned int row = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (row < m){
+        for (unsigned int col = 0; col < n; col++){
+            float sum = 0.0f;
+            for (unsigned int i = 0; i < k; ++i) {
+                sum += A_d[row * k + i] * B_d[i * n + col];
+            }
+            C_d[row * n + col] = sum;
+        }
+    }
+
+}
+
+// CUDA kernel where each thread computes one output matrix col
+__global__ void matrixMulKernel_1thread1col(int m, int k, int n, const float *A_d, const float *B_d, float* C_d){
+    unsigned int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (col < n){
+        for (unsigned int row = 0; row < m; row++){
+            float sum = 0.0f;
+            for (unsigned int i = 0; i < k; ++i) {
+                sum += A_d[row * k + i] * B_d[i * n + col];
+            }
+            C_d[row * n + col] = sum;
+        }
+    }
+
+}
+
+// functions for allocating/freeing memory and calling each kernel 
 void basicSgemm_d_1thread1element (int m, int k, int n, const float *A_h, const float *B_h, float* C_h){
     // allocate device memory on GPU for arrays A_d, B_d, C_d
     float *A_d,  *B_d, *C_d;
@@ -81,38 +113,50 @@ void basicSgemm_d_1thread1element (int m, int k, int n, const float *A_h, const 
     cudaFree(C_d);
 }
 
-// CUDA kernel where each thread computes one output matrix row, 
-// and function for device allocation and free, memcpy, and calling the kernel
-__global__ void matrixMulKernel_1thread1row(int m, int k, int n, const float *A_d, const float *B_d, float* C_d){
-    unsigned int row = blockIdx.y * blockDim.y + threadIdx.y;
+void basicSgemm_d_1thread1row (int m, int k, int n, const float *A_h, const float *B_h, float* C_h){
+    // allocate device memory on GPU for arrays A_d, B_d, C_d
+    float *A_d,  *B_d, *C_d;
+    CHECK(cudaMalloc((void**)&A_d, sizeof(float)*(m * k)));
+    CHECK(cudaMalloc((void**)&B_d, sizeof(float)*(k * n)));
+    CHECK(cudaMalloc((void**)&C_d, sizeof(float)*(m * n)));
 
-    if (row < m){
-        for (unsigned int col = 0; col < n; col++){
-            float sum = 0.0f;
-            for (unsigned int i = 0; i < k; ++i) {
-                sum += A_d[row * k + i] * B_d[i * n + col];
-            }
-            C_d[row * n + col] = sum;
-        }
-    }
+    // copy A_h and B_h to A_d and B_d
+    CHECK(cudaMemcpy(A_d, A_h, sizeof(float)*(m*k), cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(B_d, B_h, sizeof(float)*(k*n), cudaMemcpyHostToDevice));
 
+    // calling matrixMulKernel_1thread1row kernel
+    matrixMulKernel_1thread1row<<<(ceil(n / 512.0), 1, 1), (512, 1, 1)>>>(m, k, n, A_d, B_d, C_d);
+
+    // copy GPU matmul results to host memory
+    cudaMemcpy(C_h, C_d, sizeof(float)*n, cudaMemcpyDeviceToHost);
+
+    // free device memory
+    cudaFree(A_d);
+    cudaFree(B_d);
+    cudaFree(C_d);
 }
 
-// CUDA kernel where each thread computes one output matrix col, 
-// and function for device allocation and free, memcpy, and calling the kernel
-__global__ void matrixMulKernel_1thread1col(int m, int k, int n, const float *A_d, const float *B_d, float* C_d){
-    unsigned int col = blockIdx.x * blockDim.x + threadIdx.x;
+void basicSgemm_d_1thread1col (int m, int k, int n, const float *A_h, const float *B_h, float* C_h){
+    // allocate device memory on GPU for arrays A_d, B_d, C_d
+    float *A_d,  *B_d, *C_d;
+    CHECK(cudaMalloc((void**)&A_d, sizeof(float)*(m * k)));
+    CHECK(cudaMalloc((void**)&B_d, sizeof(float)*(k * n)));
+    CHECK(cudaMalloc((void**)&C_d, sizeof(float)*(m * n)));
 
-    if (col < n){
-        for (unsigned int row = 0; row < m; row++){
-            float sum = 0.0f;
-            for (unsigned int i = 0; i < k; ++i) {
-                sum += A_d[row * k + i] * B_d[i * n + col];
-            }
-            C_d[row * n + col] = sum;
-        }
-    }
+    // copy A_h and B_h to A_d and B_d
+    CHECK(cudaMemcpy(A_d, A_h, sizeof(float)*(m*k), cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(B_d, B_h, sizeof(float)*(k*n), cudaMemcpyHostToDevice));
 
+    // calling matrixMulKernel_1thread1col kernel
+    matrixMulKernel_1thread1col<<<(ceil(n / 512.0), 1, 1), (512, 1, 1)>>>(m, k, n, A_d, B_d, C_d);
+
+    // copy GPU matmul results to host memory
+    cudaMemcpy(C_h, C_d, sizeof(float)*n, cudaMemcpyDeviceToHost);
+
+    // free device memory
+    cudaFree(A_d);
+    cudaFree(B_d);
+    cudaFree(C_d);
 }
 
 int main(int argc, char *argv[]) {
