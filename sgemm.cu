@@ -46,8 +46,8 @@ void basicSgemm_h(int m, int k, int n, const float *A_h, const float *B_h, float
 // CUDA kernel where each thread computes one output matrix element, 
 // and function for device allocation and free, memcpy, and calling the kernel
 __global__ void matrixMulKernel_1thread1element (int m, int k, int n, const float *A_d, const float *B_d, float* C_d){
-    unsigned int row = blockIdx.y*blockDim.y + threadIdx.y;
-    unsigned int col = blockIdx.x*blockDim.x + threadIdx.x;
+    unsigned int row = blockIdx.y * blockDim.y + threadIdx.y;
+    unsigned int col = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (row < m && col < n){
         float sum = 0.0f;
@@ -56,7 +56,6 @@ __global__ void matrixMulKernel_1thread1element (int m, int k, int n, const floa
         }
         C_d[row * n + col] = sum;
     }
-
 }
 
 void basicSgemm_d_1thread1element (int m, int k, int n, const float *A_h, const float *B_h, float* C_h){
@@ -80,9 +79,41 @@ void basicSgemm_d_1thread1element (int m, int k, int n, const float *A_h, const 
     cudaFree(A_d);
     cudaFree(B_d);
     cudaFree(C_d);
+}
+
+// CUDA kernel where each thread computes one output matrix row, 
+// and function for device allocation and free, memcpy, and calling the kernel
+__global__ void matrixMulKernel_1thread1row(int m, int k, int n, const float *A_d, const float *B_d, float* C_d){
+    unsigned int row = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (row < m){
+        for (unsigned int col = 0; col < n; col++){
+            float sum = 0.0f;
+            for (unsigned int i = 0; i < k; ++i) {
+                sum += A_d[row * k + i] * B_d[i * n + col];
+            }
+            C_d[row * n + col] = sum;
+        }
+    }
 
 }
 
+// CUDA kernel where each thread computes one output matrix col, 
+// and function for device allocation and free, memcpy, and calling the kernel
+__global__ void matrixMulKernel_1thread1col(int m, int k, int n, const float *A_d, const float *B_d, float* C_d){
+    unsigned int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (col < n){
+        for (unsigned int row = 0; row < m; row++){
+            float sum = 0.0f;
+            for (unsigned int i = 0; i < k; ++i) {
+                sum += A_d[row * k + i] * B_d[i * n + col];
+            }
+            C_d[row * n + col] = sum;
+        }
+    }
+
+}
 
 int main(int argc, char *argv[]) {
     // ./sgemm <m> <k> <n>
