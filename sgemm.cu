@@ -33,14 +33,6 @@ void basicSgemm_h(int m, int k, int n, const float *A_h, const float *B_h, float
     double endTime = CPUTimer();
 
     printf("basicSgemm_h on CPU: %.6f s\n", endTime - startTime);
-
-    // print results
-    // for (int i = 0; i < m; i++) {
-    //     for (int j = 0; j < n; j++) {
-    //         printf("%f ", C_h[i * n + j]);
-    //     }
-    //     printf("\n");
-    // }
 }
 
 // CUDA kernel where each thread computes one output matrix element
@@ -89,78 +81,152 @@ __global__ void matrixMulKernel_1thread1col(int m, int k, int n, const float *A_
 
 }
 
-// functions for allocating/freeing memory and calling each kernel 
+// functions for allocating/freeing memory/calling each kernel, and timing
 void basicSgemm_d_1thread1element (int m, int k, int n, const float *A_h, const float *B_h, float* C_h){
+    printf("1thread1element on GPU: ");
+    double startTotalTime = CPUTimer();
+
     // allocate device memory on GPU for arrays A_d, B_d, C_d
     float *A_d,  *B_d, *C_d;
+    double startTimeCudaMalloc = CPUTimer();
     CHECK(cudaMalloc((void**)&A_d, sizeof(float)*(m * k)));
     CHECK(cudaMalloc((void**)&B_d, sizeof(float)*(k * n)));
     CHECK(cudaMalloc((void**)&C_d, sizeof(float)*(m * n)));
+    double endTimeCudaMalloc = CPUTimer();
+    printf("1thread1element cudaMalloc: %.6f s\n", endTimeCudaMalloc - startTimeCudaMalloc);
 
     // copy A_h and B_h to A_d and B_d
+    double startTimeCudaMemcpy = CPUTimer();
     CHECK(cudaMemcpy(A_d, A_h, sizeof(float)*(m*k), cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(B_d, B_h, sizeof(float)*(k*n), cudaMemcpyHostToDevice));
+    double endTimeCudaMemcpy = CPUTimer();
+    printf("1thread1element cudaMemcpy: %.6f s\n", endTimeCudaMemcpy - startTimeCudaMemcpy);
 
     // calling matrixMulKernel_1thread1element kernel
-    matrixMulKernel_1thread1element<<<(ceil(n / 512.0), 1, 1), (512, 1, 1)>>>(m, k, n, A_d, B_d, C_d);
+    dim3 blockDim(32, 32);
+    int gridDimX = (n + blockDim.x - 1) / blockDim.x;  // number of blocks in x-direction (cols)
+    int gridDimY = (m + blockDim.y - 1) / blockDim.y;  // number of blocks in y-direction (rows)
+
+    double startTimeKernelCall = CPUTimer();
+    matrixMulKernel_1thread1element<<<gridDim, blockDim>>>(m, k, n, A_d, B_d, C_d);
+    double endTimeKernelCall = CPUTimer();
+    printf("matrixMulKernel_1thread1element<<<(%d,%d,1),(%d,%d,1)>>> call time: %.6f s\n", 
+        gridDim.x, gridDim.y, blockDim.x, blockDim.y, endTimeKernelCall - startTimeKernelCall);
 
     // copy GPU matmul results to host memory
+    double startTimeCudaMemcpyResults = CPUTimer();
     cudaMemcpy(C_h, C_d, sizeof(float)*n, cudaMemcpyDeviceToHost);
+    double endTimeCudaMemcpyResults = CPUTimer();
+    printf("1thread1element results cudaMemcpy: %.6f s\n", endTimeCudaMemcpyResults - startTimeCudaMemcpyResults);
 
     // free device memory
     cudaFree(A_d);
     cudaFree(B_d);
     cudaFree(C_d);
+
+    // timing results
+    double endTotalTime = CPUTimer();
+    printf("1thread1element total time: %.6f s\n", endTotalTime - startTotalTime);
 }
 
-void basicSgemm_d_1thread1row (int m, int k, int n, const float *A_h, const float *B_h, float* C_h){
+void basicSgemm_d_1thread1row(int m, int k, int n, const float *A_h, const float *B_h, float* C_h){
+    printf("1thread1row on GPU: ");
+    double startTotalTime = CPUTimer();
+
     // allocate device memory on GPU for arrays A_d, B_d, C_d
     float *A_d,  *B_d, *C_d;
+    double startTimeCudaMalloc = CPUTimer();
     CHECK(cudaMalloc((void**)&A_d, sizeof(float)*(m * k)));
     CHECK(cudaMalloc((void**)&B_d, sizeof(float)*(k * n)));
     CHECK(cudaMalloc((void**)&C_d, sizeof(float)*(m * n)));
+    double endTimeCudaMalloc = CPUTimer();
+    printf("1thread1row cudaMalloc: %.6f s\n", endTimeCudaMalloc - startTimeCudaMalloc);
 
     // copy A_h and B_h to A_d and B_d
+    double startTimeCudaMemcpy = CPUTimer();
     CHECK(cudaMemcpy(A_d, A_h, sizeof(float)*(m*k), cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(B_d, B_h, sizeof(float)*(k*n), cudaMemcpyHostToDevice));
+    double endTimeCudaMemcpy = CPUTimer();
+    printf("1thread1row cudaMemcpy: %.6f s\n", endTimeCudaMemcpy - startTimeCudaMemcpy);
 
     // calling matrixMulKernel_1thread1row kernel
-    matrixMulKernel_1thread1row<<<(ceil(n / 512.0), 1, 1), (512, 1, 1)>>>(m, k, n, A_d, B_d, C_d);
+    dim3 blockDim(32, 32);
+    int gridDimX = (n + blockDim.x - 1) / blockDim.x;  // number of blocks in x-direction (cols)
+    int gridDimY = (m + blockDim.y - 1) / blockDim.y;  // number of blocks in y-direction (rows)
+
+    double startTimeKernelCall = CPUTimer();
+    matrixMulKernel_1thread1row<<<gridDim, blockDim>>>(m, k, n, A_d, B_d, C_d);
+    double endTimeKernelCall = CPUTimer();
+    printf("matrixMulKernel_1thread1row<<<(%d,%d,1),(%d,%d,1)>>> call time: %.6f s\n", 
+        gridDim.x, gridDim.y, blockDim.x, blockDim.y, endTimeKernelCall - startTimeKernelCall);
 
     // copy GPU matmul results to host memory
+    double startTimeCudaMemcpyResults = CPUTimer();
     cudaMemcpy(C_h, C_d, sizeof(float)*n, cudaMemcpyDeviceToHost);
+    double endTimeCudaMemcpyResults = CPUTimer();
+    printf("1thread1row results cudaMemcpy: %.6f s\n", endTimeCudaMemcpyResults - startTimeCudaMemcpyResults);
 
     // free device memory
     cudaFree(A_d);
     cudaFree(B_d);
     cudaFree(C_d);
+
+    // timing results
+    double endTotalTime = CPUTimer();
+    printf("1thread1row total time: %.6f s\n", endTotalTime - startTotalTime);
 }
 
-void basicSgemm_d_1thread1col (int m, int k, int n, const float *A_h, const float *B_h, float* C_h){
+void basicSgemm_d_1thread1row(int m, int k, int n, const float *A_h, const float *B_h, float* C_h){
+    printf("1thread1col on GPU: ");
+    double startTotalTime = CPUTimer();
+
     // allocate device memory on GPU for arrays A_d, B_d, C_d
     float *A_d,  *B_d, *C_d;
+    double startTimeCudaMalloc = CPUTimer();
     CHECK(cudaMalloc((void**)&A_d, sizeof(float)*(m * k)));
     CHECK(cudaMalloc((void**)&B_d, sizeof(float)*(k * n)));
     CHECK(cudaMalloc((void**)&C_d, sizeof(float)*(m * n)));
+    double endTimeCudaMalloc = CPUTimer();
+    printf("1thread1col cudaMalloc: %.6f s\n", endTimeCudaMalloc - startTimeCudaMalloc);
 
     // copy A_h and B_h to A_d and B_d
+    double startTimeCudaMemcpy = CPUTimer();
     CHECK(cudaMemcpy(A_d, A_h, sizeof(float)*(m*k), cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(B_d, B_h, sizeof(float)*(k*n), cudaMemcpyHostToDevice));
+    double endTimeCudaMemcpy = CPUTimer();
+    printf("1thread1col cudaMemcpy: %.6f s\n", endTimeCudaMemcpy - startTimeCudaMemcpy);
 
     // calling matrixMulKernel_1thread1col kernel
-    matrixMulKernel_1thread1col<<<(ceil(n / 512.0), 1, 1), (512, 1, 1)>>>(m, k, n, A_d, B_d, C_d);
+    dim3 blockDim(32, 32);
+    int gridDimX = (n + blockDim.x - 1) / blockDim.x;  // number of blocks in x-direction (cols)
+    int gridDimY = (m + blockDim.y - 1) / blockDim.y;  // number of blocks in y-direction (rows)
+
+    double startTimeKernelCall = CPUTimer();
+    matrixMulKernel_1thread1col<<<gridDim, blockDim>>>(m, k, n, A_d, B_d, C_d);
+    double endTimeKernelCall = CPUTimer();
+    printf("matrixMulKernel_1thread1col<<<(%d,%d,1),(%d,%d,1)>>> call time: %.6f s\n", 
+        gridDim.x, gridDim.y, blockDim.x, blockDim.y, endTimeKernelCall - startTimeKernelCall);
 
     // copy GPU matmul results to host memory
+    double startTimeCudaMemcpyResults = CPUTimer();
     cudaMemcpy(C_h, C_d, sizeof(float)*n, cudaMemcpyDeviceToHost);
+    double endTimeCudaMemcpyResults = CPUTimer();
+    printf("1thread1col results cudaMemcpy: %.6f s\n", endTimeCudaMemcpyResults - startTimeCudaMemcpyResults);
 
     // free device memory
     cudaFree(A_d);
     cudaFree(B_d);
     cudaFree(C_d);
+
+    // timing results
+    double endTotalTime = CPUTimer();
+    printf("1thread1col total time: %.6f s\n", endTotalTime - startTotalTime);
 }
 
+// main
 int main(int argc, char *argv[]) {
     // ./sgemm <m> <k> <n>
+    CHECK(cudaDeviceSynchronize()); 
 
     int m = atof(argv[1]);
     int k = atof(argv[2]);
@@ -183,7 +249,9 @@ int main(int argc, char *argv[]) {
     // perform matrix multiplication
     basicSgemm_h(m, k, n, A_h, B_h, C_h);
 
-    // free allocated memory
+    // perform GPU matrix multiplication methods
+
+    // free allocated host memory
     free(A_h);
     free(B_h);
     free(C_h);
