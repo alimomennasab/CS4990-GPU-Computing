@@ -228,17 +228,37 @@ void basicSgemm_d_1thread1col(int m, int k, int n, const float *A_h, const float
 
 // verification between GPU and CPU result matrices
 bool verify(float* CPU_Answer, float* GPU_Answer, unsigned int nRows, unsigned int nCols){
+    float epsilon = 0.01f;
+    int wrongCount = 0;
+
     for (unsigned int i = 0; i < nRows; i++) {
         for (unsigned int j = 0; j < nCols; j++) {
             float cpuValue = CPU_Answer[i * nCols + j];
             float gpuValue = GPU_Answer[i * nCols + j];
-            if (cpuValue != gpuValue) {
-                printf("cpuValue[%d][%d] = %f doesn't match gpuValue[%d][%d] = %f \n\n", i, j, cpuValue, i, j, gpuValue);
-                return false; 
+            float difference = fabs(cpuValue - gpuValue);
+            if (difference > epsilon) {
+                printf("cpuValue[%d][%d] = %f doesn't match gpuValue[%d][%d] = %f \n", i, j, cpuValue, i, j, gpuValue);
+                printf("difference: %f \n", difference);
+                wrongCount++;
+                // return false; 
             }
         }
     }
+    if (wrongCount != 0){
+        printf("Wrong count: %d \n\n", wrongCount);
+        return false;
+    }
     return true;
+}
+
+// testing helper function
+void printMatrix(float* matrix, int rows, int cols) {
+    for (int i = 0; i < rows; i++) {
+        for (int j = 0; j < cols; j++) {
+            printf("%f ", matrix[i * cols + j]);
+        }
+        printf("\n");
+    }
 }
 
 // main
@@ -258,19 +278,19 @@ int main(int argc, char *argv[]) {
     float* A_h = (float*) malloc(sizeof(float)*(m * k));
     float* B_h = (float*) malloc(sizeof(float)*(k * n));
     float* C_h = (float*) calloc(m * n, sizeof(float));
+    float* C_h_gpu_answer = (float*) calloc(m * n, sizeof(float));
 
     for (unsigned int i = 0; i < m * k; i++) {
-        A_h[i] = (float)rand() / (float)(rand() % 100 / 100.0);
+        A_h[i] = rand()%100/100.0f;
     }
     for (unsigned int i = 0; i < k * n; i++) {
-        B_h[i] = (float)rand() / (float)(rand() % 100 / 100.0);
+        B_h[i] = rand()%100/100.0f;
     }
 
     // perform matrix multiplication
     basicSgemm_h(m, k, n, A_h, B_h, C_h);
 
     // perform GPU matrix multiplication methods
-    float* C_h_gpu_answer = (float*) calloc(m * n, sizeof(float));
     basicSgemm_d_1thread1element(m, k, n, A_h, B_h, C_h_gpu_answer);
     if (verify(C_h, C_h_gpu_answer, m, n)){
         printf("Verification successful: GPU and CPU result matrices match\n\n");
