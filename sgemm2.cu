@@ -3,6 +3,8 @@
 #include <sys/time.h>
 #include <math.h> 
 
+#define TILE_DIM 32 
+
 #define CHECK(call){ \
     const cudaError_t cuda_ret = call; \
     if (cuda_ret != cudaSuccess){ \
@@ -36,6 +38,7 @@ void basicSgemm_h(int m, int k, int n, const float *A_h, const float *B_h, float
 
 // CUDA kernel where each thread computes one output matrix element
 __global__ void matrixMulKernel_1thread1element (int m, int k, int n, const float *A_d, const float *B_d, float* C_d){
+
     unsigned int row = blockIdx.y * blockDim.y + threadIdx.y;
     unsigned int col = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -48,11 +51,45 @@ __global__ void matrixMulKernel_1thread1element (int m, int k, int n, const floa
     }
 }
 
-// A CUDA kernel for a “tiled” version of matrix multiplication, which uses dynamically allocated space in shared memory. 
-// Here we assume each thread calculates one element of the output matrix
-__global__ void matrixMulKernel_tiled(int m, int k, int n, const float *A_d, const float 
-    *B_d, float* C_d, unsigned Adz_sz, unsigned Bdz_sz){
+// a CUDA kernel for a tiled version of matrix multiplication, which uses dynamically allocated space in shared memory. 
+// each thread calculates one element of the output matrix
+__global__ void matrixMulKernel_tiled(int m, int k, int n, const float *A_d, const float  *B_d, float* C_d, unsigned Adz_sz, unsigned Bdz_sz){
 
+    extern __shared__ float As_Bs[];
+    float * A_s = (float *) As_Bs;
+    float * B_s = (float *) As_Bs + Adz_sz;
+        
+    unsigned int row = blockIdx.y * blockDim.y + threadIdx.y;
+    unsigned int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    float sum = 0.0f;
+
+    for(unsigned int tile = 0; tile < (k + TILE_DIM - 1) / TILE_DIM; ++tile) { //round down so we don't lose a tile
+        // Load tile to shared memory
+        if (row < m && (tile * TILE_DIM + threadIdx.x) < k) {
+            A_s[threadIdx.y * TILE_DIM + threadIdx.x] = A_d[row * k + tile * TILE_DIM + threadIdx.x];
+        } else {
+            // if the position exceeds the bounds, pad with zero
+            A_s[threadIdx.y * TILE_DIM + threadIdx.x] = 0.0f;
+        }
+    
+        if ((tile * TILE_DIM + threadIdx.y) < k && col < n) {
+            B_s[threadIdx.y * TILE_DIM + threadIdx.x] = B_d[(tile * TILE_DIM + threadIdx.y) * n + col];
+        } else {
+            B_s[threadIdx.y * TILE_DIM + threadIdx.x] = 0.0f;
+        }
+        __syncthreads();
+    
+        // Compute with tile
+        for(unsigned int i = 0; i < TILE_DIM; ++i) {
+            sum += A_s[threadIdx.y * TILE_DIM + i] * B_s[i * TILE_DIM + threadIdx.x];
+        }
+        __syncthreads();
+    }
+
+    if (row < m && col < n) {
+        C_d[row * n + col] = sum;
+    }
 }
 
 // host function allocating & freeing & copying memory/calling/timing for matrixMulKernel_1thread1element
@@ -76,7 +113,7 @@ void basicSgemm_d_1thread1element (int m, int k, int n, const float *A_h, const 
     double endTimeCudaMemcpy = CPUTimer();
     printf("    1thread1element cudaMemcpy: %.6f s\n", endTimeCudaMemcpy - startTimeCudaMemcpy);
 
-    // calling matrixMulKernel_1thread1element kernel
+    // calling matrixMulKernel_tiled kernel
     dim3 blockDim(32, 32);
     unsigned int gridDimX = (n + blockDim.x - 1) / blockDim.x;  // number of blocks in x-direction (cols)
     unsigned int gridDimY = (m + blockDim.y - 1) / blockDim.y;  // number of blocks in y-direction (rows)
@@ -90,7 +127,7 @@ void basicSgemm_d_1thread1element (int m, int k, int n, const float *A_h, const 
 
     // copy GPU matmul results to host memory
     double startTimeCudaMemcpyResults = CPUTimer();
-    cudaMemcpy(C_h, C_d, sizeof(float) * m * n, cudaMemcpyDeviceToHost);
+    CHECK(cudaMemcpy(C_h, C_d, sizeof(float) * m * n, cudaMemcpyDeviceToHost));
     double endTimeCudaMemcpyResults = CPUTimer();
     printf("    1thread1element results cudaMemcpy: %.6f s\n", endTimeCudaMemcpyResults - startTimeCudaMemcpyResults);
 
@@ -101,11 +138,61 @@ void basicSgemm_d_1thread1element (int m, int k, int n, const float *A_h, const 
 
     // timing results
     double endTotalTime = CPUTimer();
-    printf("    1thread1element total time: %.6f s\n", endTotalTime - startTotalTime);
+    printf("    Tiled 1thread1element total time: %.6f s\n", endTotalTime - startTotalTime);
 }
 
 // host function allocating & freeing & copying memory/calling/timing formatrixMulKernel_tiled()
 void basicSgemm_d_tiled (int m, int k, int n, const float *A_h, const float *B_h, float*C_h){
+    printf("Tiled 1thread1element on GPU: \n");
+    double startTotalTime = CPUTimer();
+
+    // allocate device memory on GPU for arrays A_d, B_d, C_d, as well as shared memory for tiling
+    float *A_d,  *B_d, *C_d;
+    double startTimeCudaMalloc = CPUTimer();
+    CHECK(cudaMalloc((void**)&A_d, sizeof(float)*(m * k)));
+    CHECK(cudaMalloc((void**)&B_d, sizeof(float)*(k * n)));
+    CHECK(cudaMalloc((void**)&C_d, sizeof(float)*(m * n)));
+
+    unsigned int Adz_sz = TILE_DIM * TILE_DIM;
+    unsigned int Bdz_sz = TILE_DIM * TILE_DIM;
+
+    double endTimeCudaMalloc = CPUTimer();
+    printf("    Tiled 1thread1element cudaMalloc: %.6f s\n", endTimeCudaMalloc - startTimeCudaMalloc);
+
+    // copy A_h and B_h to A_d and B_d
+    double startTimeCudaMemcpy = CPUTimer();
+    CHECK(cudaMemcpy(A_d, A_h, sizeof(float)*(m*k), cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(B_d, B_h, sizeof(float)*(k*n), cudaMemcpyHostToDevice));
+    double endTimeCudaMemcpy = CPUTimer();
+    printf("    Tiled 1thread1element cudaMemcpy: %.6f s\n", endTimeCudaMemcpy - startTimeCudaMemcpy);
+
+    // calling matrixMulKernel_1thread1element kernel
+    dim3 blockDim(32, 32);
+    unsigned int gridDimX = (n + blockDim.x - 1) / blockDim.x;  // number of blocks in x-direction (cols)
+    unsigned int gridDimY = (m + blockDim.y - 1) / blockDim.y;  // number of blocks in y-direction (rows)
+    dim3 gridDim = {gridDimX, gridDimY};
+
+    double startTimeKernelCall = CPUTimer();
+    size_t size = (Adz_sz + Bdz_sz) * sizeof(float);
+    matrixMulKernel_tiled<<<gridDim, blockDim, size>>>(m, k, n, A_d, B_d, C_d, Adz_sz, Bdz_sz);
+    double endTimeKernelCall = CPUTimer();
+    printf("    matrixMulKernel_tiled<<<(%d,%d,1),(%d,%d,1)>>> call time: %.6f s\n", 
+        gridDim.x, gridDim.y, blockDim.x, blockDim.y, endTimeKernelCall - startTimeKernelCall);
+
+    // copy GPU matmul results to host memory
+    double startTimeCudaMemcpyResults = CPUTimer();
+    CHECK(cudaMemcpy(C_h, C_d, sizeof(float) * m * n, cudaMemcpyDeviceToHost));
+    double endTimeCudaMemcpyResults = CPUTimer();
+    printf("    Tiled 1thread1element results cudaMemcpy: %.6f s\n", endTimeCudaMemcpyResults - startTimeCudaMemcpyResults);
+
+    // free device memory
+    cudaFree(A_d);
+    cudaFree(B_d);
+    cudaFree(C_d);
+
+    // timing results
+    double endTotalTime = CPUTimer();
+    printf("    Tiled 1thread1element total time: %.6f s\n", endTotalTime - startTotalTime);
 
 }
 
@@ -171,6 +258,12 @@ int main(int argc, char *argv[]) {
     }
 
     // perform GPU tiled matrix multiplication
+    basicSgemm_d_tiled(m, k, n, A_h, B_h, C_h_gpu_answer);
+    if (verify(C_h, C_h_gpu_answer, m, n)){
+        printf("Verification successful: GPU and CPU result matrices match\n\n");
+    } else {
+        printf("Verification failed: GPU and CPU result matrices don't match\n\n");
+    }
 
     // free allocated host memory
     free(A_h);
