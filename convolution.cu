@@ -5,6 +5,8 @@
 #include <opencv2/opencv.hpp>
 
 # define FILTER_RADIUS 2
+#define TILE_DIM 32 
+# define FILTER_SIZE (2 * FILTER_RADIUS + 1)
 
 // constant average filter
 const float F_h[2 * FILTER_RADIUS + 1][2 * FILTER_RADIUS + 1] = {
@@ -14,6 +16,7 @@ const float F_h[2 * FILTER_RADIUS + 1][2 * FILTER_RADIUS + 1] = {
     {1.0f / 25, 1.0f / 25, 1.0f / 25, 1.0f / 25, 1.0f / 25},
     {1.0f / 25, 1.0f / 25, 1.0f / 25, 1.0f / 25, 1.0f / 25}
 };
+__constant__ float F_d[2 * FILTER_RADIUS + 1][2 * FILTER_RADIUS + 1];
 
 #define CHECK(call){ \
     const cudaError_t cuda_ret = call; \
@@ -31,7 +34,7 @@ double CPUTimer(){
 }
 
 // verification between two cv::Mat images
-bool verify(cv::Mat answer1, cv::Mat answer2, unsigned int nRows, unsighed int nCols){
+bool verify(cv::Mat answer1, cv::Mat answer2, unsigned int nRows, unsigned int nCols){
     const float relativeTolerance = 1e-2;
     for (int i = 0; i < nRows; i++){
         for (int j = 0; j < nCols; j++){
@@ -48,45 +51,158 @@ bool verify(cv::Mat answer1, cv::Mat answer2, unsigned int nRows, unsighed int n
     return true;
 }
 
-// CPU implementation of image blur with average box filter
-void blurImage_h(cv::Mat Pout_Mat_h, cv::Mat Pin_Mat_h, unsigned int nRows unsigned int nCols){
+// CPU implementation of image blur with average box filter F_h
+void blurImage_h(cv::Mat Pout_Mat_h, cv::Mat Pin_Mat_h, unsigned int nRows, unsigned int nCols){
+    for (int rowIdx = 0; rowIdx < nRows; rowIdx++){
+        for (int colIdx = 0; colIdx < nCols; colIdx++){
+            float sumPixVal = 0.0f;
 
+            for (int blurRowOffset = -1 * FILTER_RADIUS; blurRowOffset < (FILTER_RADIUS + 1); blurRowOffset++){
+                for (int blurColOffset = -1 * FILTER_RADIUS; blurColOffset < (FILTER_RADIUS + 1); blurColOffset++){
+                    int curRowIdx = rowIdx + blurRowOffset;
+                    int curColIdx = colIdx + blurColOffset;
+
+                    if ((curRowIdx >= 0) && (curRowIdx < nRows) && (curColIdx >= 0) && (curColIdx < nCols)){
+                        sumPixVal += (Pin_Mat_h.at<unsigned char>(curRowIdx, curColIdx) / 255.0) * F_h[blurRowOffset + FILTER_RADIUS][blurColOffset + FILTER_RADIUS];
+                    }
+                }
+            }
+            // compute the average
+            Pout_Mat_h.at<unsigned char>(rowIdx, colIdx) = (unsigned char)(sumPixVal * 255.0f);
+        }
+    }
 }
 
-// CUDA kernel of image blur with average box filter
-__global__void blurImage_Kernel(unsigned char * Pout, unsigned char * Pin, unsigned int width, unsigned int height){
+// CUDA kernel of image blur with average box filter F_d
+__global__ void blurImage_Kernel(unsigned char * Pout, unsigned char * Pin, unsigned int width, unsigned int height){
+    int colIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    int rowIdx = blockIdx.y * blockDim.y + threadIdx.y;
 
+    if (colIdx < width && rowIdx < height){
+        float sumPixVal = 0.0f;
+
+        for (int blurRowOffset = -1 * FILTER_RADIUS; blurRowOffset < (FILTER_RADIUS + 1); blurRowOffset++){
+            for (int blurColOffset = -1 * FILTER_RADIUS; blurColOffset < (FILTER_RADIUS + 1); blurColOffset++){
+                int curRowIdx = rowIdx + blurRowOffset;
+                int curColIdx = colIdx + blurColOffset;
+
+                if ( (curRowIdx >= 0) && (curRowIdx < height) && (curColIdx >= 0) && (curColIdx < width)){
+                    sumPixVal += (Pin[curRowIdx * width + curColIdx] / 255.0) * F_d[blurRowOffset + FILTER_RADIUS][blurColOffset + FILTER_RADIUS];
+                }
+            }
+
+        }
+        // compute the average
+        Pout[rowIdx * width + colIdx] = (unsigned char)(sumPixVal * 255.0f);
+    }
 }
 
 // GPU implementation of image blur with average box filter
 void blurImage_d(cv::Mat Pout_Mat_h, cv::Mat Pin_Mat_h, unsigned int nRows, unsigned int nCols){
+    // allocate device memory for the input and output image
+    unsigned char * Pin_d, * Pout_d;
+    CHECK(cudaMalloc((void**)&Pin_d, nRows * nCols * sizeof(unsigned char)));
+    CHECK(cudaMalloc((void**)&Pout_d, nRows * nCols * sizeof(unsigned char)));
+
+    // copy the input image from host to device, and the filter
+    CHECK(cudaMemcpy(Pin_d, Pin_Mat_h.data, nRows * nCols * sizeof(unsigned char), cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpyToSymbol(F_d, F_h, sizeof(F_h)));
+
+    // set the kernel launch parameters
+    dim3 blockDim(32, 32);
+    unsigned int gridDimX = (nCols + blockDim.x - 1) / blockDim.x;  // number of blocks in x-direction (cols)
+    unsigned int gridDimY = (nRows + blockDim.y - 1) / blockDim.y;  // number of blocks in y-direction (rows)
+    dim3 gridDim = {gridDimX, gridDimY};
+    blurImage_Kernel<<<gridDim, blockDim>>>(Pout_d, Pin_d, nCols, nRows);
+
+    // copy the output image from device to host
+    CHECK(cudaMemcpy(Pout_Mat_h.data, Pout_d, nRows * nCols * sizeof(unsigned char), cudaMemcpyDeviceToHost));
+
+    // free device memory
+    CHECK(cudaFree(Pin_d));
+    CHECK(cudaFree(Pout_d));
 
 }
 
-// optimized CUDA kernel of image blur using the average box filter from constant memory
+// optimized CUDA kernel of tiled image blur using the average box filter from constant memory
 __global__ void blurImage_tiled_Kernel(unsigned char * Pout, unsigned char * Pin, unsigned int width, unsigned int height){
+    // shared memory for the tile
+    __shared__ float As_Bs[TILE_DIM + 2 * FILTER_RADIUS][TILE_DIM + 2 * FILTER_RADIUS];
+
+    // calculate the row and column index of the pixel (one thread per pixel)
+    int colIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    int rowIdx = blockIdx.y * blockDim.y + threadIdx.y;
+
+    // populate and load the tile into shared memory. each thread loads one pixel into a tile element
+    if (colIdx < width && rowIdx < height){
+        As_Bs[threadIdx.y][threadIdx.x] = Pin[rowIdx * width + colIdx];
+    } else {
+        // if the position exceeds the bounds, pad with zero
+        As_Bs[threadIdx.y][threadIdx.x] = 0.0f;
+    }
+    __syncthreads();
+
+    float sumPixVal = 0.0f;
+    for (int blurRowOffset = -1 * FILTER_RADIUS; blurRowOffset < (FILTER_RADIUS + 1); blurRowOffset++){
+        for (int blurColOffset = -1 * FILTER_RADIUS; blurColOffset < (FILTER_RADIUS + 1); blurColOffset++){
+            int curRowIdx = threadIdx.y + blurRowOffset;
+            int curColIdx = threadIdx.x + blurColOffset;
+
+            if ((curRowIdx >= 0) && (curRowIdx < TILE_DIM) && (curColIdx >= 0) && (curColIdx < TILE_DIM)){
+                sumPixVal += As_Bs[curRowIdx][curColIdx] * F_d[blurRowOffset + FILTER_RADIUS][blurColOffset + FILTER_RADIUS];
+            }
+        }
+    }
+    __syncthreads();
+
+    // compute the average
+    if (colIdx < width && rowIdx < height){
+        Pout[rowIdx * width + colIdx] = (unsigned char)(sumPixVal * 255.0f);
+    }
 
 }
 
 // GPU implementation of image blur with shared memory tiled convolutions with average box filter from constant memory
 void blurImage_tiled_d(cv::Mat Pout_Mat_h, cv::Mat Pin_Mat_h, unsigned int nRows, unsigned int nCols){
+    // allocate device memory for the input and output image
+    unsigned char * Pin_d, * Pout_d;
+    CHECK(cudaMalloc((void**)&Pin_d, nRows * nCols * sizeof(unsigned char)));
+    CHECK(cudaMalloc((void**)&Pout_d, nRows * nCols * sizeof(unsigned char)));
 
+    // copy the input image from host to device, and the filter
+    CHECK(cudaMemcpy(Pin_d, Pin_Mat_h.data, nRows * nCols * sizeof(unsigned char), cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpyToSymbol(F_d, F_h, sizeof(F_h)));
+
+    // set the kernel launch parameters
+    dim3 blockDim(32, 32);
+    unsigned int gridDimX = (nCols + blockDim.x - 1) / blockDim.x;  // number of blocks in x-direction (cols)
+    unsigned int gridDimY = (nRows + blockDim.y - 1) / blockDim.y;  // number of blocks in y-direction (rows)
+    dim3 gridDim = {gridDimX, gridDimY};
+    blurImage_tiled_Kernel<<<gridDim, blockDim>>>(Pout_d, Pin_d, nCols, nRows);
+
+    // copy the output image from device to host
+    CHECK(cudaMemcpy(Pout_Mat_h.data, Pout_d, nRows * nCols * sizeof(unsigned char), cudaMemcpyDeviceToHost));
+
+    // free device memory
+    CHECK(cudaFree(Pin_d));
+    CHECK(cudaFree(Pout_d));
 }
 
 // main
 int main(int argc, char** argv){
-    // parse the command line args to extrac the filename of the input iamge specified by the user
-
-    // error handling when file can't be found/loaded
-
-    // load the input image dynamically at runtime instead of using a hardcoded filename
-
+    // ./convolution <inputImg.jpg>
     CHECK(cudaDeviceSynchronize());
-
     double startTime, endTime;
 
+    // load filename from args
+    char *fileName = argv[1];
+    if (fileName == NULL){
+        printf("Error: No input image file name provided.\n");
+        return -1;
+    }
+
     // use OpenCV to load a grayscale image
-    cv::Mat grayImg = cv::imread("Santa-grayscale.jpg", cv::IMREAD_GRAYSCALE);
+    cv::Mat grayImg = cv::imread(fileName, cv::IMREAD_GRAYSCALE);
     if (grayImg.empty()) return -1;
 
     // obtain image's height, width, and number of channels
@@ -96,10 +212,11 @@ int main(int argc, char** argv){
     cv::Mat blurredImg_opencv(nRows, nCols, CV_8UC1, cv::Scalar(0));
     startTime = CPUTimer();
     cv::blur(grayImg, blurredImg_opencv, cv::Size(2 * FILTER_RADIUS + 1, 2 * FILTER_RADIUS + 1), cv::Point(-1, -1), cv::BORDER_CONSTANT);
+    endTime = CPUTimer();
     printf("openCV's blur (CPU): %f s\n\n", endTime-startTime);
 
     // CPU blurring
-    cv Mat blurredImg_cpu(nRows, nCols, CV_8UC1, cv::Scalar(0));
+    cv::Mat blurredImg_cpu(nRows, nCols, CV_8UC1, cv::Scalar(0));
     startTime = CPUTimer();
     blurImage_h(blurredImg_cpu, grayImg, nRows, nCols);
     endTime = CPUTimer();
@@ -133,8 +250,13 @@ int main(int argc, char** argv){
     if(check == false) {printf("Error!\n"); return -1; }
 
     // verify the results
+    printf("Verifying CPU blurring results: " );
     verify(blurredImg_opencv, blurredImg_cpu, nRows, nCols);
+
+    printf("Verifying GPU blurring results: ");
     verify(blurredImg_opencv, blurredImg_gpu, nRows, nCols);
+
+    printf("Verifying tiled GPU blurring results: ");
     verify(blurredImg_opencv, blurredImg_tiled_gpu, nRows, nCols);
 
     return 0;
