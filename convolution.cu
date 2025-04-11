@@ -6,17 +6,17 @@
 
 # define FILTER_RADIUS 2
 #define TILE_DIM 32 
-# define FILTER_SIZE (2 * FILTER_RADIUS + 1)
+# define FILTER_DIM (2 * FILTER_RADIUS + 1)
 
 // constant average filter
-const float F_h[2 * FILTER_RADIUS + 1][2 * FILTER_RADIUS + 1] = {
+const float F_h[FILTER_DIM][FILTER_DIM] = {
     {1.0f / 25, 1.0f / 25, 1.0f / 25, 1.0f / 25, 1.0f / 25},
     {1.0f / 25, 1.0f / 25, 1.0f / 25, 1.0f / 25, 1.0f / 25},
     {1.0f / 25, 1.0f / 25, 1.0f / 25, 1.0f / 25, 1.0f / 25},
     {1.0f / 25, 1.0f / 25, 1.0f / 25, 1.0f / 25, 1.0f / 25},
     {1.0f / 25, 1.0f / 25, 1.0f / 25, 1.0f / 25, 1.0f / 25}
 };
-__constant__ float F_d[2 * FILTER_RADIUS + 1][2 * FILTER_RADIUS + 1];
+__constant__ float F_d[FILTER_DIM][FILTER_DIM];
 
 #define CHECK(call){ \
     const cudaError_t cuda_ret = call; \
@@ -125,41 +125,44 @@ void blurImage_d(cv::Mat Pout_Mat_h, cv::Mat Pin_Mat_h, unsigned int nRows, unsi
 }
 
 // optimized CUDA kernel of tiled image blur using the average box filter from constant memory
-__global__ void blurImage_tiled_Kernel(unsigned char * Pout, unsigned char * Pin, unsigned int width, unsigned int height){
-    // shared memory for the tile
-    __shared__ float As_Bs[TILE_DIM + 2 * FILTER_RADIUS][TILE_DIM + 2 * FILTER_RADIUS];
+__global__ void blurImage_tiled_Kernel(unsigned char *Pout, unsigned char *Pin, unsigned int width, unsigned int height) {
+    __shared__ float tile[TILE_DIM + 2 * FILTER_RADIUS][TILE_DIM + 2 * FILTER_RADIUS];
 
-    // calculate the row and column index of the pixel (one thread per pixel)
-    int colIdx = blockIdx.x * blockDim.x + threadIdx.x;
-    int rowIdx = blockIdx.y * blockDim.y + threadIdx.y;
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
 
-    // populate and load the tile into shared memory. each thread loads one pixel into a tile element
-    if (colIdx < width && rowIdx < height){
-        As_Bs[threadIdx.y][threadIdx.x] = Pin[rowIdx * width + colIdx];
-    } else {
-        // if the position exceeds the bounds, pad with zero
-        As_Bs[threadIdx.y][threadIdx.x] = 0.0f;
-    }
-    __syncthreads();
+    int row_o = blockIdx.y * TILE_DIM + ty;  // output pixel row
+    int col_o = blockIdx.x * TILE_DIM + tx;  // output pixel col
 
-    float sumPixVal = 0.0f;
-    for (int blurRowOffset = -1 * FILTER_RADIUS; blurRowOffset < (FILTER_RADIUS + 1); blurRowOffset++){
-        for (int blurColOffset = -1 * FILTER_RADIUS; blurColOffset < (FILTER_RADIUS + 1); blurColOffset++){
-            int curRowIdx = threadIdx.y + blurRowOffset;
-            int curColIdx = threadIdx.x + blurColOffset;
+    // Loop over shared memory tile with coarsening to load the tile and the padding 
+    for (int i = ty; i < TILE_DIM + 2 * FILTER_RADIUS; i += blockDim.y) {
+        for (int j = tx; j < TILE_DIM + 2 * FILTER_RADIUS; j += blockDim.x) {
+            int row_i = blockIdx.y * TILE_DIM + i - FILTER_RADIUS;
+            int col_i = blockIdx.x * TILE_DIM + j - FILTER_RADIUS;
 
-            if ((curRowIdx >= 0) && (curRowIdx < TILE_DIM) && (curColIdx >= 0) && (curColIdx < TILE_DIM)){
-                sumPixVal += As_Bs[curRowIdx][curColIdx] * F_d[blurRowOffset + FILTER_RADIUS][blurColOffset + FILTER_RADIUS];
+            if (row_i >= 0 && row_i < height && col_i >= 0 && col_i < width) {
+                tile[i][j] = Pin[row_i * width + col_i] / 255.0f;
+            } else {
+                tile[i][j] = 0.0f;
             }
         }
     }
     __syncthreads();
 
-    // compute the average
-    if (colIdx < width && rowIdx < height){
-        Pout[rowIdx * width + colIdx] = (unsigned char)(sumPixVal * 255.0f);
-    }
+    // compute blurred pixel
+    if (row_o < height && col_o < width) {
+        float sumPixVal = 0.0f;
 
+        for (int fy = 0; fy < FILTER_DIM; fy++) {
+            for (int fx = 0; fx < FILTER_DIM; fx++) {
+                sumPixVal += tile[ty + fy][tx + fx] * F_d[fy][fx];
+            }
+        }
+
+        // Convert back to byte and store
+        Pout[row_o * width + col_o] = (unsigned char)(sumPixVal * 255.0f);
+
+    }
 }
 
 // GPU implementation of image blur with shared memory tiled convolutions with average box filter from constant memory
