@@ -47,16 +47,18 @@ bool verify(cv::Mat answer1, cv::Mat answer2, unsigned int nRows, unsigned int n
             }
         }
     }
-    printf("TEST PASSED\n\n");
+    printf("TEST PASSED\n");
     return true;
 }
 
 // CPU implementation of image blur with average box filter F_h
 void blurImage_h(cv::Mat Pout_Mat_h, cv::Mat Pin_Mat_h, unsigned int nRows, unsigned int nCols){
+    // loop through every pixel in the image
     for (int rowIdx = 0; rowIdx < nRows; rowIdx++){
         for (int colIdx = 0; colIdx < nCols; colIdx++){
             float sumPixVal = 0.0f;
 
+            // loop through each filter element 
             for (int blurRowOffset = -1 * FILTER_RADIUS; blurRowOffset < (FILTER_RADIUS + 1); blurRowOffset++){
                 for (int blurColOffset = -1 * FILTER_RADIUS; blurColOffset < (FILTER_RADIUS + 1); blurColOffset++){
                     int curRowIdx = rowIdx + blurRowOffset;
@@ -78,9 +80,11 @@ __global__ void blurImage_Kernel(unsigned char * Pout, unsigned char * Pin, unsi
     int colIdx = blockIdx.x * blockDim.x + threadIdx.x;
     int rowIdx = blockIdx.y * blockDim.y + threadIdx.y;
 
+    // check if the current pixel of the thread is within the bounds
     if (colIdx < width && rowIdx < height){
         float sumPixVal = 0.0f;
 
+        // loop through each filter element 
         for (int blurRowOffset = -1 * FILTER_RADIUS; blurRowOffset < (FILTER_RADIUS + 1); blurRowOffset++){
             for (int blurColOffset = -1 * FILTER_RADIUS; blurColOffset < (FILTER_RADIUS + 1); blurColOffset++){
                 int curRowIdx = rowIdx + blurRowOffset;
@@ -134,7 +138,7 @@ __global__ void blurImage_tiled_Kernel(unsigned char *Pout, unsigned char *Pin, 
     int row_o = blockIdx.y * TILE_DIM + ty;  // output pixel row
     int col_o = blockIdx.x * TILE_DIM + tx;  // output pixel col
 
-    // Loop over shared memory tile with coarsening to load the tile and the padding 
+    // Loop over shared memory tile with coarsening to load the tile and the surrounding padding 
     for (int i = ty; i < TILE_DIM + 2 * FILTER_RADIUS; i += blockDim.y) {
         for (int j = tx; j < TILE_DIM + 2 * FILTER_RADIUS; j += blockDim.x) {
             int row_i = blockIdx.y * TILE_DIM + i - FILTER_RADIUS;
@@ -153,6 +157,7 @@ __global__ void blurImage_tiled_Kernel(unsigned char *Pout, unsigned char *Pin, 
     if (row_o < height && col_o < width) {
         float sumPixVal = 0.0f;
 
+        // convolution
         for (int fy = 0; fy < FILTER_DIM; fy++) {
             for (int fx = 0; fx < FILTER_DIM; fx++) {
                 sumPixVal += tile[ty + fy][tx + fx] * F_d[fy][fx];
@@ -216,28 +221,28 @@ int main(int argc, char** argv){
     startTime = CPUTimer();
     cv::blur(grayImg, blurredImg_opencv, cv::Size(2 * FILTER_RADIUS + 1, 2 * FILTER_RADIUS + 1), cv::Point(-1, -1), cv::BORDER_CONSTANT);
     endTime = CPUTimer();
-    printf("openCV's blur (CPU): %f s\n\n", endTime-startTime);
+    printf("openCV's blur (CPU): %f s\n", endTime-startTime);
 
     // CPU blurring
     cv::Mat blurredImg_cpu(nRows, nCols, CV_8UC1, cv::Scalar(0));
     startTime = CPUTimer();
     blurImage_h(blurredImg_cpu, grayImg, nRows, nCols);
     endTime = CPUTimer();
-    printf("blurImage on CPU: %f s\n\n", endTime-startTime);
+    printf("blurImage on CPU: %f s\n", endTime-startTime);
 
     // GPU blurring that calls the kernel
     cv::Mat blurredImg_gpu(nRows, nCols, CV_8UC1, cv::Scalar(0));
     startTime = CPUTimer();
     blurImage_d(blurredImg_gpu, grayImg, nRows, nCols);
     endTime = CPUTimer();
-    printf("blurImage on GPU: %f s\n\n", endTime-startTime);
+    printf("blurImage on GPU: %f s\n", endTime-startTime);
     
     // GPU blurring that calls the shared-memory tiled convolution kernel
     cv::Mat blurredImg_tiled_gpu(nRows, nCols, CV_8UC1, cv::Scalar(0));
     startTime = CPUTimer();
     blurImage_tiled_d(blurredImg_tiled_gpu, grayImg, nRows, nCols);
     endTime = CPUTimer();
-    printf("(tiled)blurImage on GPU: %f s\n\n", endTime-startTime);
+    printf("blurImage with tiling on GPU: %f s\n\n", endTime-startTime);
 
     // saved the blurred image to disk
     bool check = cv::imwrite("./blurredImg_opencv.jpg", blurredImg_opencv);
